@@ -1,0 +1,8 @@
+{
+  "name": "AI Meeting Assistant",
+  "description": "An AI-powered meeting assistant that transcribes audio, analyzes discussions against a checklist, and generates summaries with action items.",
+  "requestFramePermissions": [
+    "microphone",
+    "display-capture"
+  ]
+}
