@@ -45,37 +45,68 @@ export const AudioInput: React.FC<AudioInputProps> = ({ onFileProcessed, onStart
       displayStream.getVideoTracks().forEach(track => track.stop());
 
       // Create a new AudioContext to mix the streams
-      const context = new AudioContext();
+      // Use 16kHz to match the Gemini Live API requirements and avoid sample rate mismatch
+      const context = new AudioContext({ sampleRate: 16000 });
       audioContextRef.current = context;
 
       // Create sources for both streams
       const micSource = context.createMediaStreamSource(micStream);
       
       // Check if display stream has an audio track
+      console.log('[AudioInput] Display stream audio tracks:', displayStream.getAudioTracks().length);
+      displayStream.getAudioTracks().forEach((track, i) => {
+        console.log(`[AudioInput] Audio track ${i}:`, {
+          label: track.label,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState,
+          settings: track.getSettings(),
+        });
+      });
+
       let displaySource;
       if (displayStream.getAudioTracks().length > 0) {
         displaySource = context.createMediaStreamSource(displayStream);
+        console.log('[AudioInput] Created displaySource from audio track');
       } else {
         console.warn("Display media was shared without an audio track.");
+        alert(
+          "⚠️ Screen audio not detected!\n\n" +
+          "Please ensure you checked the 'Share audio' checkbox when sharing your screen.\n\n" +
+          "For MS Teams: Use teams.microsoft.com in your browser (not the desktop app) and share the BROWSER TAB."
+        );
       }
 
       // Create a destination node to hold the mixed audio
       const destination = context.createMediaStreamDestination();
 
       // Connect sources to the destination
+      console.log('[AudioInput] Connecting audio sources:', {
+        hasMicSource: !!micSource,
+        hasDisplaySource: !!displaySource,
+      });
       micSource.connect(destination);
       if (displaySource) {
         displaySource.connect(destination);
       }
-      
+
       // The destination's stream is the combined audio stream
       const combinedStream = destination.stream;
-      
+      console.log('[AudioInput] Combined stream created:', {
+        streamId: combinedStream.id,
+        audioTracks: combinedStream.getAudioTracks().length,
+        micTracks: micStream.getAudioTracks().length,
+        displayTracks: displayStream.getAudioTracks().length,
+      });
+
       // Listen for when the user stops sharing via the browser UI
-      displayStream.getAudioTracks()[0].onended = () => {
-           console.log('Stream ended by user.');
-           onStopRecording();
-      };
+      const displayAudioTracks = displayStream.getAudioTracks();
+      if (displayAudioTracks.length > 0) {
+        displayAudioTracks[0].onended = () => {
+          console.log('Stream ended by user.');
+          onStopRecording();
+        };
+      }
 
       onStartRecording(combinedStream);
       console.log('Recording started with combined audio.');

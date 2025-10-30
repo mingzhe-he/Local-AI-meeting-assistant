@@ -1,14 +1,10 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-// Fix: The 'LiveSession' type is not exported from the '@google/genai' package.
-// It has been removed from the import statement.
-import { GoogleGenAI, Modality, Blob } from '@google/genai';
 import { Header } from './components/Header';
 import { AudioInput } from './components/AudioInput';
 import { TranscriptView } from './components/TranscriptView';
 import { AnalysisPanel } from './components/AnalysisPanel';
 import { type TranscriptEntry, type AnalysisResult, type LlmSettings } from './types';
 import { analyzeTranscript } from './services/geminiService';
-import { ai } from './services/geminiService';
 
 // Mock transcript data to simulate Whisper's output for file uploads
 const MOCK_TRANSCRIPT: TranscriptEntry[] = [
@@ -49,31 +45,17 @@ function formatElapsedTime(ms: number): string {
   return `${minutes}:${seconds}.${milliseconds}`;
 }
 
-// Audio processing helpers for Live API
-function encode(bytes: Uint8Array) {
-  let binary = '';
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+// Web Speech API type declarations
+declare global {
+  interface Window {
+    SpeechRecognition: any;
+    webkitSpeechRecognition: any;
   }
-  return btoa(binary);
-}
-
-function createBlob(data: Float32Array): Blob {
-  const l = data.length;
-  const int16 = new Int16Array(l);
-  for (let i = 0; i < l; i++) {
-    int16[i] = data[i] * 32768;
-  }
-  return {
-    data: encode(new Uint8Array(int16.buffer)),
-    mimeType: 'audio/pcm;rate=16000',
-  };
 }
 
 const SETTINGS_STORAGE_KEY = 'ai-meeting-assistant-settings';
 const DEFAULT_SETTINGS: LlmSettings = {
-  provider: 'gemini',
+  provider: 'ollama', // Default to free Ollama
   openAiApiKey: '',
   ollamaUrl: 'http://localhost:11434',
   ollamaModel: 'llama3',
@@ -109,12 +91,9 @@ export default function App() {
   const currentUtteranceRef = useRef<string>('');
   const speakerRef = useRef(currentSpeaker);
 
-  // Refs for Live API
-  // Fix: The 'LiveSession' type is not exported. Using 'any' for the session ref.
-  const sessionRef = useRef<any | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  // Refs for Web Speech API
+  const recognitionRef = useRef<any | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
     try {
@@ -159,24 +138,25 @@ export default function App() {
   }, [startTranscriptSimulation]);
 
   const handleStopRecording = useCallback(() => {
+    console.log('[App] Stopping recording...');
     setIsRecording(false);
-    sessionRef.current?.close();
-    sessionRef.current = null;
-    
-    // Disconnect audio nodes for cleanup
-    if (scriptProcessorRef.current) {
-        scriptProcessorRef.current.disconnect();
-        scriptProcessorRef.current = null;
-    }
-    if (mediaStreamSourceRef.current) {
-        mediaStreamSourceRef.current.disconnect();
-        mediaStreamSourceRef.current = null;
+
+    // Stop speech recognition
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        console.error('[App] Error stopping recognition:', e);
+      }
+      recognitionRef.current = null;
     }
 
-    if (audioContextRef.current && audioContextRef.current.state === 'running') {
-      audioContextRef.current.close().then(() => audioContextRef.current = null);
+    // Stop media stream tracks
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
     }
-    
+
     // Finalize any remaining utterance
     const finalUtterance = currentUtteranceRef.current.trim();
     if (finalUtterance) {
@@ -192,6 +172,20 @@ export default function App() {
   }, []);
   
   const handleStartRecording = useCallback(async (stream: MediaStream) => {
+    console.log('[App] Starting recording with Web Speech API (FREE)');
+    console.log('[App] Stream info:', {
+      streamId: stream.id,
+      active: stream.active,
+      audioTracks: stream.getAudioTracks().length,
+    });
+
+    // Check if Web Speech API is available
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setError('Web Speech API is not supported in this browser. Please use Chrome or Edge.');
+      return;
+    }
+
     stopTranscriptSimulation();
     setIsRecording(true);
     setTranscript([]);
@@ -201,76 +195,92 @@ export default function App() {
     setError(null);
     setHasAutoReviewed(false);
     recordingStartTimeRef.current = Date.now();
+    mediaStreamRef.current = stream;
 
     try {
-       const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-        callbacks: {
-          onopen: () => {
-            console.log('Live session opened.');
-            // Start streaming audio from the microphone
-            if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-                // Fix: 'webkitAudioContext' is not available on the window type in modern TypeScript lib.dom.d.ts.
-                // Casting window to 'any' to allow usage for older browser compatibility.
-                audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-            }
-            const source = audioContextRef.current.createMediaStreamSource(stream);
-            mediaStreamSourceRef.current = source;
-            const scriptProcessor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
-            scriptProcessorRef.current = scriptProcessor;
+      // Create speech recognition instance
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true; // Keep listening
+      recognition.interimResults = true; // Get partial results
+      recognition.lang = 'en-US'; // Set language
+      recognition.maxAlternatives = 1;
 
-            scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-              const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-              const pcmBlob = createBlob(inputData);
-              sessionPromise.then((session) => {
-                  session.sendRealtimeInput({ media: pcmBlob });
-              });
-            };
-            
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(audioContextRef.current.destination);
-          },
-          onmessage: (message) => {
-            if (message.serverContent?.inputTranscription) {
-              const text = message.serverContent.inputTranscription.text;
-              currentUtteranceRef.current += text;
-              setCurrentUtterance(currentUtteranceRef.current);
-            }
-             if (message.serverContent?.turnComplete) {
-                const finalUtterance = currentUtteranceRef.current.trim();
-                if (finalUtterance) {
-                    const elapsedMs = Date.now() - (recordingStartTimeRef.current ?? Date.now());
-                    setTranscript(prev => [...(prev ?? []), {
-                        timestamp: formatElapsedTime(elapsedMs),
-                        speaker: speakerRef.current,
-                        text: finalUtterance,
-                    }]);
-                }
-                currentUtteranceRef.current = '';
-                setCurrentUtterance('');
-            }
-          },
-          onerror: (e) => {
-            console.error('Live session error:', e);
-            setError('An error occurred with the live transcription.');
-            handleStopRecording();
-          },
-          onclose: () => {
-            console.log('Live session closed.');
-          },
-        },
-        config: {
-          responseModalities: [Modality.AUDIO], // Required for Live
-          inputAudioTranscription: {},
-        },
-      });
-      sessionRef.current = await sessionPromise;
+      console.log('[App] Web Speech Recognition initialized');
+
+      // Handle results (partial and final)
+      recognition.onresult = (event: any) => {
+        let interimTranscript = '';
+        let finalTranscript = '';
+
+        // Process all results
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript;
+            console.log('[App] Final transcript:', transcript);
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+
+        // Update current utterance with interim results
+        if (interimTranscript) {
+          setCurrentUtterance(interimTranscript);
+        }
+
+        // Add final transcript to the transcript array
+        if (finalTranscript) {
+          const elapsedMs = Date.now() - (recordingStartTimeRef.current ?? Date.now());
+          setTranscript(prev => [...(prev ?? []), {
+            timestamp: formatElapsedTime(elapsedMs),
+            speaker: speakerRef.current,
+            text: finalTranscript.trim(),
+          }]);
+          setCurrentUtterance(''); // Clear interim after finalizing
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error('[App] Speech recognition error:', event.error);
+        if (event.error === 'no-speech') {
+          console.log('[App] No speech detected, continuing...');
+          return; // Don't treat as fatal error
+        }
+        if (event.error === 'aborted') {
+          console.log('[App] Speech recognition aborted (user stopped)');
+          return;
+        }
+        setError(`Speech recognition error: ${event.error}`);
+        handleStopRecording();
+      };
+
+      recognition.onend = () => {
+        console.log('[App] Speech recognition ended');
+        // Auto-restart if still recording (handles timeouts)
+        if (isRecording && recognitionRef.current) {
+          console.log('[App] Auto-restarting speech recognition...');
+          try {
+            recognition.start();
+          } catch (e) {
+            console.error('[App] Failed to restart recognition:', e);
+          }
+        }
+      };
+
+      recognition.onstart = () => {
+        console.log('[App] Speech recognition started successfully');
+      };
+
+      // Store reference and start
+      recognitionRef.current = recognition;
+      recognition.start();
+
     } catch (e) {
-        console.error("Failed to start live session:", e);
-        setError("Could not start live transcription session.");
-        setIsRecording(false);
+      console.error('[App] Failed to start speech recognition:', e);
+      setError('Could not start speech recognition. Please check microphone permissions.');
+      setIsRecording(false);
     }
-  }, [stopTranscriptSimulation, handleStopRecording]);
+  }, [stopTranscriptSimulation, handleStopRecording, isRecording]);
 
   const handleToggleSpeaker = useCallback(() => {
     setCurrentSpeaker(prev => prev === 'Speaker 1' ? 'Speaker 2' : 'Speaker 1');

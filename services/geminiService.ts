@@ -3,11 +3,8 @@ import { type TranscriptEntry, type AnalysisResult, type LlmSettings } from '../
 
 const API_KEY = process.env.API_KEY;
 
-if (!API_KEY) {
-  throw new Error("API_KEY environment variable not set");
-}
-
-export const ai = new GoogleGenAI({ apiKey: API_KEY });
+// Initialize Gemini only if API key is provided (optional - only needed if using Gemini provider for analysis)
+export const ai = API_KEY ? new GoogleGenAI({ apiKey: API_KEY }) : null;
 
 const geminiModel = 'gemini-2.5-flash';
 
@@ -85,6 +82,10 @@ const getJsonSchemaPrompt = (): string => `
 `;
 
 async function analyzeWithGemini(transcript: TranscriptEntry[], checklist: string): Promise<AnalysisResult> {
+  if (!ai) {
+    throw new Error("Gemini API key is not configured. Please set GEMINI_API_KEY in .env.local or use a different provider (Ollama, OpenAI, LM Studio).");
+  }
+
   const formattedTranscript = formatTranscript(transcript);
   const prompt = getBasePrompt(formattedTranscript, checklist);
 

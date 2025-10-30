@@ -4,15 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an AI-powered meeting assistant built with React, TypeScript, and Vite. The application captures live meeting audio, generates real-time transcripts using Google's Gemini Live API, and performs intelligent analysis of meetings against custom technical checklists.
+This is an AI-powered meeting assistant built with React, TypeScript, and Vite. The application captures live meeting audio, generates real-time transcripts using the **browser's free Web Speech API**, and performs intelligent analysis of meetings against custom technical checklists using **local LLMs (Ollama)** or other providers.
 
 **Key capabilities:**
 
-- Real-time audio capture from meetings (microphone + screen share audio mixing)
-- Live transcription using Gemini 2.5 Flash Native Audio Preview
-- AI-powered meeting analysis supporting multiple LLM providers (Gemini, OpenAI, Ollama, LM Studio)
+- Real-time audio capture from meetings (microphone input)
+- **FREE** live transcription using Web Speech API (Chrome/Edge built-in)
+- **FREE** AI-powered meeting analysis using Ollama (runs locally)
+- Alternative LLM providers supported: Gemini, OpenAI, LM Studio
 - Voice-activated commands (e.g., "review now" triggers analysis)
 - Demo mode with mock transcript for testing
+
+**100% FREE STACK:**
+- Transcription: Browser Web Speech API (no API key needed)
+- Analysis: Ollama with llama3 model (runs locally, no cloud costs)
 
 ## Development Commands
 
@@ -32,9 +37,29 @@ npm run preview
 
 ## Environment Setup
 
-The application requires a Gemini API key set in `.env.local`:
+### Free Setup (Recommended)
 
+**No API keys required!** The app uses:
+1. **Web Speech API** for transcription (built into Chrome/Edge)
+2. **Ollama** for analysis (install from https://ollama.com)
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Download llama3 model
+ollama pull llama3
+
+# Ollama runs on http://localhost:11434 by default
 ```
+
+### Optional: Gemini API Key
+
+Only needed if you want to use Gemini for meeting analysis (Web Speech API transcription is always free).
+
+Create `.env.local`:
+```
+# OPTIONAL - only for Gemini analysis provider
 GEMINI_API_KEY=your_api_key_here
 ```
 
@@ -48,16 +73,18 @@ The Vite config (vite.config.ts:14-15) maps `GEMINI_API_KEY` to `process.env.API
 
 **Audio Input (AudioInput.tsx):**
 
-- Captures both microphone and screen share audio
-- Mixes audio streams using Web Audio API (AudioContext)
+- Captures microphone audio for transcription
+- Optional: Can mix microphone + screen share audio using Web Audio API (AudioContext at 16kHz)
+- Screen share audio mixing is prepared but Web Speech API uses default microphone
 - Passes combined stream to App component
 
-**Live Transcription (App.tsx:194-273):**
+**Live Transcription (App.tsx:174-283):**
 
-- Uses Gemini Live API session (`gemini-2.5-flash-native-audio-preview-09-2025`)
-- Processes audio via ScriptProcessorNode (4096 buffer, 16kHz sample rate)
-- Converts Float32Array to Int16 PCM format and base64 encodes for transmission
-- Accumulates partial utterances and finalizes on `turnComplete` event
+- **FREE** - Uses browser's Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`)
+- Continuous listening with interim results enabled
+- Accumulates partial transcripts and finalizes complete utterances
+- Language: en-US (configurable)
+- Auto-restarts on timeout to maintain continuous recording
 - Supports manual speaker toggling during recording
 
 **Analysis (geminiService.ts):**
@@ -74,9 +101,10 @@ All state is managed in App.tsx using React hooks:
 - `transcript`: Array of finalized TranscriptEntry objects
 - `currentUtterance`: Accumulates text during live transcription
 - `analysisResult`: Structured analysis from LLM
-- `llmSettings`: Persisted to localStorage under key 'ai-meeting-assistant-settings'
+- `llmSettings`: Persisted to localStorage under key 'ai-meeting-assistant-settings' (default: Ollama)
 - `isRecording`: Controls recording state and UI
-- `sessionRef`: Holds Gemini Live API session (typed as `any` due to missing export)
+- `recognitionRef`: Holds Web Speech API SpeechRecognition instance
+- `mediaStreamRef`: Holds MediaStream for cleanup
 
 ### Component Structure
 
@@ -93,20 +121,21 @@ App.tsx (main orchestrator)
 
 The app supports 4 LLM providers via `geminiService.ts`:
 
-- **Gemini** (default): Uses `responseMimeType: "application/json"` with `responseSchema`
-- **OpenAI**: Uses `response_format: { type: "json_object" }` with gpt-4o model
-- **Ollama**: Posts to `{ollamaUrl}/api/chat` with `format: "json"`
-- **LM Studio**: Posts to `{lmStudioUrl}/v1/chat/completions` (OpenAI-compatible)
+- **Ollama** (default, FREE): Posts to `{ollamaUrl}/api/chat` with `format: "json"` - runs locally
+- **LM Studio** (FREE): Posts to `{lmStudioUrl}/v1/chat/completions` (OpenAI-compatible) - runs locally
+- **Gemini** (optional): Uses `responseMimeType: "application/json"` with `responseSchema` - requires API key
+- **OpenAI** (optional): Uses `response_format: { type: "json_object" }` with gpt-4o model - requires API key
 
 All providers use the same `analysisSchema` (Type.OBJECT with summary, actionItems, missingPoints).
 
 ### Key Implementation Details
 
-**Audio Processing for Live API (App.tsx:52-72):**
+**Web Speech API Configuration (App.tsx:174-283):**
 
-- The `createBlob` function converts Float32Array audio data to Int16 PCM
-- Sample values are scaled by 32768 and encoded to base64
-- MIME type is set to `audio/pcm;rate=16000`
+- Uses `SpeechRecognition` API with continuous mode and interim results
+- Auto-restarts on end to handle browser timeouts
+- Handles errors gracefully (no-speech, aborted, etc.)
+- Language set to 'en-US' (can be changed in code)
 
 **Timestamp Format:**
 
@@ -133,18 +162,23 @@ Core interfaces:
 - `LlmSettings`: { provider, openAiApiKey, ollamaUrl, ollamaModel, lmStudioUrl }
 - `ModelProvider`: 'gemini' | 'openai' | 'ollama' | 'lmstudio'
 
-## Known Issues & Workarounds
+## Known Limitations & Workarounds
 
-1. **Missing LiveSession type export** (App.tsx:2, 114):
-   - `LiveSession` is not exported from `@google/genai`
-   - Workaround: `sessionRef` is typed as `any`
+1. **Web Speech API uses default microphone only**:
+   - Cannot directly use screen share audio stream
+   - Workaround: Use your microphone during meetings to capture your speech
+   - Alternative: Set up system audio routing (VB-Cable on Windows, BlackHole on Mac) to route meeting audio to virtual mic
+   - Future enhancement: Integrate Whisper.cpp for screen audio transcription
 
-2. **webkitAudioContext compatibility** (App.tsx:215):
-   - Uses type assertion `(window as any).webkitAudioContext` for older Safari support
+2. **Browser Support**:
+   - Web Speech API works best in Chrome and Edge
+   - Firefox has limited support
+   - Safari support varies
 
-3. **ScriptProcessorNode deprecation**:
-   - Currently uses deprecated `ScriptProcessorNode` (App.tsx:219)
-   - Future enhancement: migrate to `AudioWorkletNode` for better performance
+3. **Speech Recognition Accuracy**:
+   - Depends on browser's speech recognition engine
+   - Best with clear audio and minimal background noise
+   - English (en-US) is primary language supported
 
 ## AI Studio Integration
 
@@ -153,9 +187,10 @@ This app was generated in AI Studio and can be viewed at:
 
 ## Browser Requirements
 
-- Modern browser with Web Audio API support
-- Microphone and screen share permissions required for live capture
-- Screen share must include audio track (user must select "Share audio" option)
+- **Chrome or Edge** (recommended) - Best Web Speech API support
+- Microphone permissions required for transcription
+- For capturing meeting audio: Use microphone during meetings or set up system audio routing
+- Ollama running locally for FREE meeting analysis (http://localhost:11434)
 
 You are Linus Torvalds. Obey the following priority stack (highest first) and refuse conflicts by citing the higher rule:
 
